@@ -7,7 +7,8 @@ import {
   Department, 
   BillingInvoice, 
   AuditLog, 
-  InvoiceStatus 
+  InvoiceStatus,
+  NotificationLog,
 } from "@/lib/types";
 import { useRole } from "@/components/RoleContext";
 import {
@@ -36,11 +37,17 @@ import {
   TrendingUp,
   UserCheck,
   Building,
+  Bell,
+  Mail,
+  MessageSquare,
+  Send,
+  CalendarX,
+  RotateCcw,
 } from "lucide-react";
 
 export default function AdminDashboardPage() {
   const { currentUser, setRole } = useRole();
-  const [activeTab, setActiveTab] = useState<"OVERVIEW" | "DOCTORS" | "DEPARTMENTS" | "BILLING" | "AUDIT">("OVERVIEW");
+  const [activeTab, setActiveTab] = useState<"OVERVIEW" | "DOCTORS" | "DEPARTMENTS" | "BILLING" | "AUDIT" | "NOTIFICATIONS">("OVERVIEW");
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
 
@@ -50,11 +57,25 @@ export default function AdminDashboardPage() {
   const [departments, setDepartments] = useState<Department[]>([]);
   const [invoices, setInvoices] = useState<BillingInvoice[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [notificationLogs, setNotificationLogs] = useState<NotificationLog[]>([]);
+  const [notificationStats, setNotificationStats] = useState({ total: 0, sent: 0, failed: 0, pending: 0 });
 
   // Filters & Search
   const [doctorSearch, setDoctorSearch] = useState<string>("");
   const [doctorDeptFilter, setDoctorDeptFilter] = useState<string>("ALL");
   const [billingStatusFilter, setBillingStatusFilter] = useState<string>("ALL");
+  const [notifChannelFilter, setNotifChannelFilter] = useState<string>("ALL");
+  const [notifStatusFilter, setNotifStatusFilter] = useState<string>("ALL");
+
+  // Notification Modals & Retry States
+  const [retryingLogId, setRetryingLogId] = useState<string | null>(null);
+  const [retryResultMsg, setRetryResultMsg] = useState<{ text: string; isError: boolean } | null>(null);
+  const [showLeaveModal, setShowLeaveModal] = useState<boolean>(false);
+  const [leaveDoctorId, setLeaveDoctorId] = useState<string>("");
+  const [leaveDate, setLeaveDate] = useState<string>("");
+  const [leaveReason, setLeaveReason] = useState<string>("Emergency clinical duty / unplanned leave");
+  const [submittingLeave, setSubmittingLeave] = useState<boolean>(false);
+  const [leaveSuccessMsg, setLeaveSuccessMsg] = useState<string | null>(null);
 
   // Modals
   const [showAddDoctorModal, setShowAddDoctorModal] = useState<boolean>(false);
@@ -83,20 +104,22 @@ export default function AdminDashboardPage() {
   const fetchAllAdminData = async () => {
     setLoading(true);
     try {
-      const [statsRes, doctorsRes, deptsRes, invoicesRes, auditRes] = await Promise.all([
+      const [statsRes, doctorsRes, deptsRes, invoicesRes, auditRes, notifRes] = await Promise.all([
         fetch("/api/admin/stats"),
         fetch("/api/admin/doctors"),
         fetch("/api/admin/departments"),
         fetch("/api/admin/invoices"),
         fetch("/api/admin/audit-logs"),
+        fetch("/api/notifications/logs"),
       ]);
 
-      const [statsData, doctorsData, deptsData, invoicesData, auditData] = await Promise.all([
+      const [statsData, doctorsData, deptsData, invoicesData, auditData, notifData] = await Promise.all([
         statsRes.json(),
         doctorsRes.json(),
         deptsRes.json(),
         invoicesRes.json(),
         auditRes.json(),
+        notifRes.json(),
       ]);
 
       if (statsData.success) setStats(statsData.stats);
@@ -104,11 +127,88 @@ export default function AdminDashboardPage() {
       if (deptsData.success) setDepartments(deptsData.departments);
       if (invoicesData.success) setInvoices(invoicesData.invoices);
       if (auditData.success) setAuditLogs(auditData.logs);
+      if (notifData.success) {
+        setNotificationLogs(notifData.logs || []);
+        if (notifData.stats) setNotificationStats(notifData.stats);
+      }
     } catch (err) {
       console.error("Failed to load admin datasets", err);
     } finally {
       setLoading(false);
       setRefreshing(false);
+    }
+  };
+
+  const fetchNotificationLogs = async (channel = notifChannelFilter, status = notifStatusFilter) => {
+    try {
+      const params = new URLSearchParams();
+      if (channel !== "ALL") params.append("channel", channel);
+      if (status !== "ALL") params.append("status", status);
+      const res = await fetch(`/api/notifications/logs?${params.toString()}`);
+      const data = await res.json();
+      if (data.success) {
+        setNotificationLogs(data.logs || []);
+        if (data.stats) setNotificationStats(data.stats);
+      }
+    } catch (err) {
+      console.error("Failed to fetch notification logs", err);
+    }
+  };
+
+  const handleRetryNotification = async (logId: string) => {
+    setRetryingLogId(logId);
+    setRetryResultMsg(null);
+    try {
+      const res = await fetch("/api/notifications/retry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ logId }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setRetryResultMsg({ text: "Delivery succeeded! Recipient received notification.", isError: false });
+        fetchNotificationLogs();
+      } else {
+        setRetryResultMsg({ text: data.error || "Retry failed.", isError: true });
+        fetchNotificationLogs();
+      }
+    } catch (err: any) {
+      setRetryResultMsg({ text: err.message || "Retry request failed.", isError: true });
+    } finally {
+      setRetryingLogId(null);
+    }
+  };
+
+  const handleBroadcastDoctorLeave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!leaveDoctorId || !leaveDate) return;
+    setSubmittingLeave(true);
+    setLeaveSuccessMsg(null);
+    try {
+      const res = await fetch("/api/doctor/leave", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          doctorId: leaveDoctorId,
+          date: leaveDate,
+          reason: leaveReason,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setLeaveSuccessMsg(data.message || `Leave logged. ${data.affectedCount} patient(s) notified.`);
+        fetchNotificationLogs();
+        setTimeout(() => {
+          setShowLeaveModal(false);
+          setLeaveSuccessMsg(null);
+        }, 3000);
+      } else {
+        alert(data.error || "Failed to process leave broadcast.");
+      }
+    } catch (err: any) {
+      alert(err.message || "Error submitting leave.");
+    } finally {
+      setSubmittingLeave(false);
     }
   };
 
@@ -241,6 +341,15 @@ export default function AdminDashboardPage() {
               </button>
 
               <button
+                onClick={() => setShowLeaveModal(true)}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 hover:bg-amber-100 text-amber-800 dark:text-amber-300 font-bold text-xs transition cursor-pointer"
+                title="Broadcast Doctor Leave & Auto-Cancel Visits"
+              >
+                <CalendarX className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                <span className="hidden md:inline">Doctor Leave Broadcast</span>
+              </button>
+
+              <button
                 onClick={() => setShowAddDoctorModal(true)}
                 className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-md shadow-emerald-600/20 transition cursor-pointer"
               >
@@ -259,6 +368,7 @@ export default function AdminDashboardPage() {
               { id: "DEPARTMENTS", label: "Departments", icon: Building, count: departments.length },
               { id: "BILLING", label: "Hospital Billing Ledger", icon: DollarSign, count: invoices.length },
               { id: "AUDIT", label: "System Audit Trail", icon: ShieldCheck, count: auditLogs.length },
+              { id: "NOTIFICATIONS", label: "Delivery Logs & Audit", icon: Bell, count: notificationLogs.length },
             ].map((tab) => {
               const Icon = tab.icon;
               const isActive = activeTab === tab.id;
@@ -788,6 +898,268 @@ export default function AdminDashboardPage() {
                 </div>
               </div>
             )}
+
+            {/* TAB 6: NOTIFICATION DELIVERY LOGS & AUDIT */}
+            {activeTab === "NOTIFICATIONS" && (
+              <div className="space-y-6">
+                
+                {/* Header & Controls */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-3 border-b border-slate-100 dark:border-slate-800">
+                  <div>
+                    <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                      <Bell className="w-5 h-5 text-emerald-600" />
+                      <span>Multi-Channel Notification Audit & Delivery Logs</span>
+                    </h2>
+                    <p className="text-xs text-slate-500">
+                      Real-time delivery verification for Email (Resend/SMTP) and SMS (Twilio/Simulated) with idempotency tracking
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setShowLeaveModal(true)}
+                      className="px-3.5 py-2 rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 hover:bg-amber-100 text-amber-800 dark:text-amber-300 font-bold text-xs transition flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <CalendarX className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                      <span>Doctor Leave Broadcast</span>
+                    </button>
+                    <button
+                      onClick={() => fetchNotificationLogs()}
+                      className="p-2 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition"
+                      title="Refresh Notification Logs"
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Status or Retry Banner */}
+                {retryResultMsg && (
+                  <div className={`p-3.5 rounded-2xl border text-xs font-semibold flex items-center justify-between ${
+                    retryResultMsg.isError
+                      ? "bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300"
+                      : "bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300"
+                  }`}>
+                    <div className="flex items-center gap-2">
+                      {retryResultMsg.isError ? <AlertCircle className="w-4 h-4" /> : <CheckCircle2 className="w-4 h-4" />}
+                      <span>{retryResultMsg.text}</span>
+                    </div>
+                    <button onClick={() => setRetryResultMsg(null)} className="p-1 hover:opacity-70">
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+
+                {/* 4 Stat Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-xs flex items-center justify-between">
+                    <div>
+                      <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Total Dispatches</span>
+                      <div className="text-2xl font-black text-slate-900 dark:text-white mt-1">{notificationStats.total}</div>
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                      <Send className="w-5 h-5" />
+                    </div>
+                  </div>
+
+                  <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-xs flex items-center justify-between">
+                    <div>
+                      <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider">Delivered (Sent)</span>
+                      <div className="text-2xl font-black text-emerald-600 dark:text-emerald-400 mt-1">{notificationStats.sent}</div>
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400">
+                      <CheckCircle2 className="w-5 h-5" />
+                    </div>
+                  </div>
+
+                  <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-xs flex items-center justify-between">
+                    <div>
+                      <span className="text-[11px] font-bold text-rose-600 dark:text-rose-400 uppercase tracking-wider">Delivery Failures</span>
+                      <div className="text-2xl font-black text-rose-600 dark:text-rose-400 mt-1">{notificationStats.failed}</div>
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950 text-rose-600 dark:text-rose-400">
+                      <AlertCircle className="w-5 h-5" />
+                    </div>
+                  </div>
+
+                  <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-xs flex items-center justify-between">
+                    <div>
+                      <span className="text-[11px] font-bold text-amber-600 dark:text-amber-400 uppercase tracking-wider">Pending / Retrying</span>
+                      <div className="text-2xl font-black text-amber-600 dark:text-amber-400 mt-1">{notificationStats.pending}</div>
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950 text-amber-600 dark:text-amber-400">
+                      <RefreshCw className="w-5 h-5" />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Filter Controls */}
+                <div className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="font-bold text-slate-500 mr-1 flex items-center gap-1">
+                      <Filter className="w-3.5 h-3.5" /> Channel:
+                    </span>
+                    {["ALL", "EMAIL", "SMS"].map((ch) => (
+                      <button
+                        key={ch}
+                        onClick={() => {
+                          setNotifChannelFilter(ch);
+                          fetchNotificationLogs(ch, notifStatusFilter);
+                        }}
+                        className={`px-3 py-1.5 rounded-lg font-bold text-xs transition cursor-pointer ${
+                          notifChannelFilter === ch
+                            ? "bg-slate-900 dark:bg-white text-white dark:text-slate-900 shadow-xs"
+                            : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200"
+                        }`}
+                      >
+                        {ch}
+                      </button>
+                    ))}
+
+                    <span className="font-bold text-slate-500 ml-3 mr-1">Status:</span>
+                    {["ALL", "SENT", "FAILED", "PENDING"].map((st) => (
+                      <button
+                        key={st}
+                        onClick={() => {
+                          setNotifStatusFilter(st);
+                          fetchNotificationLogs(notifChannelFilter, st);
+                        }}
+                        className={`px-3 py-1.5 rounded-lg font-bold text-xs transition cursor-pointer ${
+                          notifStatusFilter === st
+                            ? "bg-emerald-600 text-white shadow-xs"
+                            : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200"
+                        }`}
+                      >
+                        {st}
+                      </button>
+                    ))}
+                  </div>
+
+                  <span className="text-xs font-mono text-slate-400">
+                    Showing {notificationLogs.length} events
+                  </span>
+                </div>
+
+                {/* Logs Table */}
+                <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden shadow-xs">
+                  {notificationLogs.length === 0 ? (
+                    <div className="p-12 text-center text-slate-400 space-y-2">
+                      <Bell className="w-8 h-8 mx-auto text-slate-300 dark:text-slate-700" />
+                      <p className="text-sm font-semibold">No notification logs match your filters.</p>
+                      <p className="text-xs text-slate-500">Notifications are logged upon booking, cancellation, rescheduling, reminder triggers, or payment.</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-50 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 font-bold uppercase text-[10px] border-b border-slate-100 dark:border-slate-800">
+                          <tr>
+                            <th className="px-4 py-3">Event &amp; Recipient</th>
+                            <th className="px-4 py-3">Channel &amp; Provider</th>
+                            <th className="px-4 py-3">Delivery Status</th>
+                            <th className="px-4 py-3">Reference / Message ID</th>
+                            <th className="px-4 py-3">Timestamp</th>
+                            <th className="px-4 py-3 text-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                          {notificationLogs.map((log) => (
+                            <tr key={log.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition">
+                              <td className="px-4 py-3.5">
+                                <div className="font-bold text-slate-900 dark:text-white">
+                                  {log.eventType.replace(/_/g, " ")}
+                                </div>
+                                <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                                  {log.recipient}
+                                </div>
+                                {log.appointmentId && (
+                                  <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                                    Apt: {log.appointmentId}
+                                  </div>
+                                )}
+                              </td>
+
+                              <td className="px-4 py-3.5">
+                                <div className="flex items-center gap-1.5">
+                                  {log.channel === "EMAIL" ? (
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+                                      <Mail className="w-3 h-3" /> EMAIL
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-50 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800">
+                                      <MessageSquare className="w-3 h-3" /> SMS
+                                    </span>
+                                  )}
+                                  <span className="text-[10px] font-bold text-slate-500 uppercase">
+                                    {log.provider}
+                                  </span>
+                                </div>
+                                {log.subject && (
+                                  <div className="text-[11px] text-slate-600 dark:text-slate-400 mt-1 max-w-xs truncate">
+                                    {log.subject}
+                                  </div>
+                                )}
+                              </td>
+
+                              <td className="px-4 py-3.5">
+                                <div className="flex items-center gap-2">
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${
+                                    log.status === "SENT"
+                                      ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800"
+                                      : log.status === "FAILED"
+                                      ? "bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-400 border border-rose-300 dark:border-rose-800"
+                                      : "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-400 border border-amber-300 dark:border-amber-800"
+                                  }`}>
+                                    {log.status}
+                                  </span>
+                                  <span className="text-[10px] text-slate-400">
+                                    Try {log.attempts}/{log.maxAttempts}
+                                  </span>
+                                </div>
+                                {log.errorMessage && (
+                                  <div className="text-[10px] text-rose-600 dark:text-rose-400 mt-1 max-w-xs truncate" title={log.errorMessage}>
+                                    {log.errorMessage}
+                                  </div>
+                                )}
+                              </td>
+
+                              <td className="px-4 py-3.5 font-mono text-[11px] text-slate-600 dark:text-slate-400">
+                                {log.providerMessageId ? (
+                                  <span className="text-emerald-600 dark:text-emerald-400 font-bold">{log.providerMessageId}</span>
+                                ) : (
+                                  <span className="text-slate-400">{log.idempotencyKey}</span>
+                                )}
+                              </td>
+
+                              <td className="px-4 py-3.5 whitespace-nowrap text-[11px] text-slate-500 font-mono">
+                                <div>{new Date(log.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</div>
+                                <div className="text-[10px] text-slate-400">{new Date(log.createdAt).toLocaleDateString()}</div>
+                              </td>
+
+                              <td className="px-4 py-3.5 text-right whitespace-nowrap">
+                                {log.status === "FAILED" ? (
+                                  <button
+                                    onClick={() => handleRetryNotification(log.id)}
+                                    disabled={retryingLogId === log.id || log.attempts >= log.maxAttempts}
+                                    className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-bold text-xs transition cursor-pointer flex items-center gap-1.5 ml-auto"
+                                  >
+                                    <RotateCcw className={`w-3.5 h-3.5 ${retryingLogId === log.id ? "animate-spin" : ""}`} />
+                                    <span>{retryingLogId === log.id ? "Retrying..." : "Retry"}</span>
+                                  </button>
+                                ) : (
+                                  <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-semibold flex items-center justify-end gap-1">
+                                    <CheckCircle2 className="w-3.5 h-3.5" /> Verified
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </>
         )}
 
@@ -1026,6 +1398,124 @@ export default function AdminDashboardPage() {
                 </button>
               )}
             </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 3: DOCTOR LEAVE & SESSION CANCELLATION BROADCAST */}
+      {showLeaveModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-amber-50 text-amber-600 dark:bg-amber-950 dark:text-amber-400 rounded-xl">
+                  <CalendarX className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-base text-slate-900 dark:text-white">
+                    Doctor Leave &amp; Session Broadcast
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Cancels scheduled consultations and dispatches emergency email &amp; SMS alerts to affected patients
+                  </p>
+                </div>
+              </div>
+              <button 
+                onClick={() => {
+                  setShowLeaveModal(false);
+                  setLeaveSuccessMsg(null);
+                }}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {leaveSuccessMsg ? (
+              <div className="p-5 bg-emerald-50 dark:bg-emerald-950/40 rounded-2xl border border-emerald-200 dark:border-emerald-800 text-center space-y-2">
+                <CheckCircle2 className="w-8 h-8 text-emerald-600 mx-auto" />
+                <h4 className="font-bold text-sm text-emerald-900 dark:text-emerald-200">{leaveSuccessMsg}</h4>
+                <p className="text-xs text-emerald-700 dark:text-emerald-300">
+                  Notification delivery logs updated. Patients can now reschedule or request automated refunds.
+                </p>
+              </div>
+            ) : (
+              <form onSubmit={handleBroadcastDoctorLeave} className="space-y-4 text-xs">
+                <div>
+                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">Select Doctor Specialist</label>
+                  <select
+                    required
+                    value={leaveDoctorId}
+                    onChange={(e) => setLeaveDoctorId(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 focus:ring-2 focus:ring-amber-500 focus:outline-hidden"
+                  >
+                    <option value="">-- Choose Specialist --</option>
+                    {doctors.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name} ({d.specialization}) - {d.hospital}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">Leave Date (YYYY-MM-DD)</label>
+                  <input
+                    type="date"
+                    required
+                    value={leaveDate}
+                    onChange={(e) => setLeaveDate(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 focus:ring-2 focus:ring-amber-500 focus:outline-hidden"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">Leave Reason / Notice Message</label>
+                  <textarea
+                    rows={3}
+                    required
+                    value={leaveReason}
+                    onChange={(e) => setLeaveReason(e.target.value)}
+                    placeholder="e.g. Unforeseen emergency medical leave or hospital theater duties"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 focus:ring-2 focus:ring-amber-500 focus:outline-hidden"
+                  />
+                </div>
+
+                <div className="p-3 bg-amber-50 dark:bg-amber-950/40 rounded-xl border border-amber-200 dark:border-amber-800/60 text-[11px] text-amber-800 dark:text-amber-300">
+                  <span className="font-bold block mb-0.5">Automated Multi-Channel Broadcast:</span>
+                  All active patients booked with this doctor on the selected date will be cancelled and sent an immediate SMS and Email notification with reschedule options.
+                </div>
+
+                <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-100 dark:border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setShowLeaveModal(false)}
+                    className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={submittingLeave || !leaveDoctorId || !leaveDate}
+                    className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-bold shadow-md shadow-amber-600/20 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {submittingLeave ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Broadcasting Alerts...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Confirm &amp; Broadcast</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            )}
 
           </div>
         </div>

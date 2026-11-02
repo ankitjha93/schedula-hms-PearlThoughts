@@ -529,6 +529,232 @@ async function main() {
     }
   });
 
+  // =========================================================================
+  // DAY 5: APPOINTMENT NOTIFICATIONS & AUDIT SUITE
+  // =========================================================================
+
+  // 27. Multi-Channel Notification Audit Logs Endpoint
+  await runTest('GET /api/notifications/logs returns delivery logs with filter stats', async () => {
+    const res = await fetch(`${BASE_URL}/api/notifications/logs`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data.success || !Array.isArray(data.logs)) {
+      throw new Error('Notification logs endpoint failed to return array of logs');
+    }
+    if (!data.stats || typeof data.stats.total !== 'number') {
+      throw new Error('Notification logs missing stats summary');
+    }
+  });
+
+  // 28. Booking Notification Verification
+  let day5BookingId = null;
+  await runTest('Booking consultation records multi-channel (EMAIL/SMS) notification logs', async () => {
+    const day5Date = `2026-12-${String(1 + Math.floor(Math.random() * 20)).padStart(2, '0')}`;
+    const slotsRes = await fetch(`${BASE_URL}/api/doctors/doc_1?date=${day5Date}`);
+    const slotsData = await slotsRes.json();
+    const availableSlot = (slotsData.slots || []).find(s => s.available) || { time: '11:00 AM' };
+    const day5Time = availableSlot.time;
+
+    const bookRes = await fetch(`${BASE_URL}/api/appointments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        patientId: 'pat_1',
+        patientName: 'John Doe',
+        patientEmail: 'john.doe@medrella.com',
+        patientPhone: '+1 (555) 019-2831',
+        doctorId: 'doc_1',
+        doctorName: 'Dr. Jane Smith',
+        doctorSpecialty: 'Cardiology',
+        date: day5Date,
+        time: day5Time,
+        symptoms: 'Day 5 Notification Test Checkup',
+      }),
+    });
+    const bookData = await bookRes.json();
+    if (!bookData.success || !bookData.appointment) {
+      throw new Error(`Failed to create test appointment: ${bookData.error || 'Unknown'}`);
+    }
+    day5BookingId = bookData.appointment.id;
+
+    // Check logs for this appointment
+    const logRes = await fetch(`${BASE_URL}/api/notifications/logs?appointmentId=${day5BookingId}`);
+    const logData = await logRes.json();
+    if (!logData.success || logData.logs.length === 0) {
+      throw new Error('No notification logs created for booked appointment');
+    }
+
+    const emailLog = logData.logs.find(l => l.channel === 'EMAIL' && l.eventType === 'BOOKING_CONFIRMATION');
+    if (!emailLog) throw new Error('Missing EMAIL BOOKING_CONFIRMATION log entry');
+    if (emailLog.status !== 'SENT') throw new Error(`Expected SENT status, got ${emailLog.status}`);
+  });
+
+  // 29. Patient Communication Preferences (GET & PATCH)
+  await runTest('GET & PATCH /api/patient/preferences respects channel opt-outs', async () => {
+    // 1. Get initial prefs
+    const getRes = await fetch(`${BASE_URL}/api/patient/preferences?patientId=pat_1`);
+    if (!getRes.ok) throw new Error(`HTTP ${getRes.status} on GET preferences`);
+    const getData = await getRes.json();
+    if (!getData.success || !getData.preferences) throw new Error('Preferences not found');
+
+    // 2. Toggle SMS off
+    const patchRes = await fetch(`${BASE_URL}/api/patient/preferences`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        patientId: 'pat_1',
+        preferences: { smsEnabled: false, remindersEnabled: false },
+      }),
+    });
+    if (!patchRes.ok) throw new Error(`HTTP ${patchRes.status} on PATCH preferences`);
+    const patchData = await patchRes.json();
+    if (!patchData.success || patchData.preferences.smsEnabled !== false) {
+      throw new Error('Failed to update patient notification preferences');
+    }
+
+    // 3. Reset back to enabled for normal testing
+    await fetch(`${BASE_URL}/api/patient/preferences`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        patientId: 'pat_1',
+        preferences: { smsEnabled: true, remindersEnabled: true },
+      }),
+    });
+  });
+
+  // 30. Notification Delivery Retry Endpoint
+  await runTest('POST /api/notifications/retry validates retry logic and updates log', async () => {
+    // Grab any existing log or fetch from logs endpoint
+    const logRes = await fetch(`${BASE_URL}/api/notifications/logs`);
+    const logData = await logRes.json();
+    if (!logData.logs || logData.logs.length === 0) {
+      throw new Error('No existing notification logs found to test retry');
+    }
+    const targetLog = logData.logs[0];
+
+    const retryRes = await fetch(`${BASE_URL}/api/notifications/retry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ logId: targetLog.id }),
+    });
+    if (!retryRes.ok) {
+      const err = await retryRes.json();
+      throw new Error(`Retry returned HTTP ${retryRes.status}: ${err.error}`);
+    }
+    const retryData = await retryRes.json();
+    if (!retryData.success || !retryData.log) {
+      throw new Error('Notification retry failed to return success and log');
+    }
+    if (retryData.log.attempts < targetLog.attempts) {
+      throw new Error('Retry did not increment attempts count');
+    }
+  });
+
+  // 31. Reschedule & Cancellation Notification Logs
+  await runTest('Rescheduling & Cancellation trigger respective notification logs', async () => {
+    if (!day5BookingId) throw new Error('No test appointment ID available');
+
+    const reschedDate = `2026-12-${String(21 + Math.floor(Math.random() * 7)).padStart(2, '0')}`;
+    const slotsRes = await fetch(`${BASE_URL}/api/doctors/doc_1?date=${reschedDate}`);
+    const slotsData = await slotsRes.json();
+    const openSlot = (slotsData.slots || []).find(s => s.available) || { time: '02:00 PM' };
+
+    // 1. Reschedule
+    const reschedRes = await fetch(`${BASE_URL}/api/appointments/${day5BookingId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'RESCHEDULE',
+        newDate: reschedDate,
+        newTime: openSlot.time,
+        date: reschedDate,
+        time: openSlot.time,
+        reason: 'Patient request test',
+      }),
+    });
+    if (!reschedRes.ok) throw new Error(`HTTP ${reschedRes.status} on reschedule`);
+
+    // 2. Cancel
+    const cancelRes = await fetch(`${BASE_URL}/api/appointments/${day5BookingId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: 'CANCELLED',
+        cancellationReason: 'Completed test run',
+      }),
+    });
+    if (!cancelRes.ok) throw new Error(`HTTP ${cancelRes.status} on cancellation`);
+
+    // 3. Verify logs recorded
+    const logRes = await fetch(`${BASE_URL}/api/notifications/logs?appointmentId=${day5BookingId}`);
+    const logData = await logRes.json();
+    const hasResched = logData.logs.some(l => l.eventType === 'RESCHEDULE_CONFIRMATION' || l.eventType === 'RESCHEDULE');
+    const hasCancel = logData.logs.some(l => l.eventType === 'CANCELLATION_CONFIRMATION' || l.eventType === 'CANCELLATION');
+
+    if (!hasResched) throw new Error('Reschedule confirmation log not recorded');
+    if (!hasCancel) throw new Error('Cancellation confirmation log not recorded');
+  });
+
+  // 32. Doctor Leave Broadcast & Session Cancellation
+  await runTest('POST /api/doctor/leave cancels sessions and broadcasts notifications', async () => {
+    const leaveDate = `2026-12-${String(10 + Math.floor(Math.random() * 15)).padStart(2, '0')}`;
+    const slotsRes = await fetch(`${BASE_URL}/api/doctors/doc_2?date=${leaveDate}`);
+    const slotsData = await slotsRes.json();
+    const availableSlot = (slotsData.slots || []).find(s => s.available) || { time: '10:00 AM' };
+
+    // Create an appointment for doc_2 on leaveDate
+    const bookRes = await fetch(`${BASE_URL}/api/appointments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        patientId: 'pat_1',
+        patientName: 'John Doe',
+        patientEmail: 'john.doe@medrella.com',
+        patientPhone: '+1 (555) 019-2831',
+        doctorId: 'doc_2',
+        doctorName: 'Dr. Robert Chen',
+        doctorSpecialty: 'Dermatology',
+        date: leaveDate,
+        time: availableSlot.time,
+        symptoms: 'Doctor Leave Test Visit',
+      }),
+    });
+    const bookData = await bookRes.json();
+    if (!bookData.success) throw new Error('Failed to book appointment for doctor leave test');
+    const apptId = bookData.appointment.id;
+
+    // Trigger Doctor Leave
+    const leaveRes = await fetch(`${BASE_URL}/api/doctor/leave`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        doctorId: 'doc_2',
+        date: leaveDate,
+        reason: 'Attending International Dermatology Congress',
+      }),
+    });
+    if (!leaveRes.ok) throw new Error(`HTTP ${leaveRes.status} on doctor leave`);
+    const leaveData = await leaveRes.json();
+    if (!leaveData.success || leaveData.affectedCount < 1) {
+      throw new Error(`Expected at least 1 affected appointment, got ${leaveData.affectedCount}`);
+    }
+
+    // Verify appointment was cancelled
+    const checkApptRes = await fetch(`${BASE_URL}/api/appointments`);
+    const checkData = await checkApptRes.json();
+    const appt = (checkData.appointments || []).find(a => a.id === apptId);
+    if (!appt || appt.status !== 'CANCELLED') {
+      throw new Error(`Appointment ${apptId} was not marked CANCELLED by doctor leave`);
+    }
+
+    // Verify DOCTOR_LEAVE notification log
+    const logRes = await fetch(`${BASE_URL}/api/notifications/logs?appointmentId=${apptId}`);
+    const logData = await logRes.json();
+    const leaveLog = logData.logs.find(l => l.eventType === 'DOCTOR_LEAVE');
+    if (!leaveLog) throw new Error('Missing DOCTOR_LEAVE notification log');
+  });
+
   console.log('\x1b[36m%s\x1b[0m', '-------------------------------------------------');
   const resultColor = passedTests === totalTests ? '\x1b[32m' : '\x1b[33m';
   console.log(`${resultColor}%s\x1b[0m`, `Test Results: ${passedTests} / ${totalTests} Tests Passed`);

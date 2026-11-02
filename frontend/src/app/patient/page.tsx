@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { Appointment, BillingInvoice, PatientProfile } from "@/lib/types";
+import { Appointment, BillingInvoice, PatientProfile, PatientNotificationPreferences } from "@/lib/types";
 import { useRole } from "@/components/RoleContext";
 import { downloadCalendarEvent } from "@/lib/calendar";
 import {
@@ -39,15 +39,27 @@ import {
   TrendingUp,
   Undo2,
   CheckCircle2,
+  Bell,
+  Mail,
+  MessageSquare,
+  ShieldAlert,
 } from "lucide-react";
 import { formatConsultationWindow } from "@/lib/timeUtils";
 
 export default function PatientAppointmentsPage() {
   const { currentUser, setRole } = useRole();
-  const [activeTab, setActiveTab] = useState<"VISITS" | "EHR" | "INVOICES">("VISITS");
+  const [activeTab, setActiveTab] = useState<"VISITS" | "EHR" | "INVOICES" | "PREFERENCES">("VISITS");
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [invoices, setInvoices] = useState<BillingInvoice[]>([]);
   const [profile, setProfile] = useState<PatientProfile | null>(null);
+  const [preferences, setPreferences] = useState<PatientNotificationPreferences>({
+    emailEnabled: true,
+    smsEnabled: true,
+    remindersEnabled: true,
+    marketingConsent: false,
+  });
+  const [savingPrefs, setSavingPrefs] = useState<boolean>(false);
+  const [prefsSuccess, setPrefsSuccess] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [filter, setFilter] = useState<string>("ALL");
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -85,25 +97,55 @@ export default function PatientAppointmentsPage() {
     setLoading(true);
     try {
       const pId = currentUser.patientId || "pat_1";
-      const [apptRes, invRes, profRes] = await Promise.all([
+      const [apptRes, invRes, profRes, prefRes] = await Promise.all([
         fetch(`/api/appointments?patientId=${pId}`),
         fetch(`/api/admin/invoices?patientId=${pId}`),
         fetch(`/api/patient/profile?patientId=${pId}`),
+        fetch(`/api/patient/preferences?patientId=${pId}`),
       ]);
 
-      const [apptData, invData, profData] = await Promise.all([
+      const [apptData, invData, profData, prefData] = await Promise.all([
         apptRes.json(),
         invRes.json(),
         profRes.json(),
+        prefRes.json(),
       ]);
 
       setAppointments(apptData.appointments || []);
       setInvoices(invData.invoices || []);
       if (profData.success) setProfile(profData.profile);
+      if (prefData.success && prefData.preferences) setPreferences(prefData.preferences);
     } catch (err) {
       console.error("Failed to load patient data", err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleTogglePreference = async (key: keyof PatientNotificationPreferences) => {
+    const updated = { ...preferences, [key]: !preferences[key] };
+    setPreferences(updated);
+    setSavingPrefs(true);
+    setPrefsSuccess(null);
+    try {
+      const pId = currentUser.patientId || "pat_1";
+      const res = await fetch("/api/patient/preferences", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          patientId: pId,
+          preferences: { [key]: updated[key] },
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setPrefsSuccess("Communication preferences updated successfully.");
+        setTimeout(() => setPrefsSuccess(null), 3000);
+      }
+    } catch (err) {
+      console.error("Failed to update preferences", err);
+    } finally {
+      setSavingPrefs(false);
     }
   };
 
@@ -427,6 +469,7 @@ export default function PatientAppointmentsPage() {
           { id: "VISITS", label: "My Appointments", icon: Calendar, count: appointments.length },
           { id: "EHR", label: "Longitudinal EHR Timeline", icon: Activity, count: appointments.filter(a => a.status === "COMPLETED").length },
           { id: "INVOICES", label: "Invoices & Receipts", icon: DollarSign, count: invoices.length },
+          { id: "PREFERENCES", label: "Notification Channels & Preferences", icon: Bell, count: null },
         ].map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
@@ -442,11 +485,13 @@ export default function PatientAppointmentsPage() {
             >
               <Icon className="w-4 h-4" />
               <span>{tab.label}</span>
-              <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-extrabold ${
-                isActive ? "bg-white/25 text-white" : "bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200"
-              }`}>
-                {tab.count}
-              </span>
+              {tab.count !== null && (
+                <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-extrabold ${
+                  isActive ? "bg-white/25 text-white" : "bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200"
+                }`}>
+                  {tab.count}
+                </span>
+              )}
             </button>
           );
         })}
@@ -843,6 +888,206 @@ export default function PatientAppointmentsPage() {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* TAB 4: COMMUNICATION & NOTIFICATION PREFERENCES */}
+      {activeTab === "PREFERENCES" && (
+        <div className="space-y-6">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800 gap-2">
+            <div>
+              <h2 className="text-base font-bold text-slate-900 dark:text-white">Patient Communication & Delivery Channels</h2>
+              <p className="text-xs text-slate-500">Configure your email, SMS, and automated reminder alerts adhering to HIPAA confidentiality guardrails</p>
+            </div>
+            {prefsSuccess && (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 text-xs font-semibold animate-in fade-in">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>{prefsSuccess}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Privacy notice banner */}
+          <div className="p-4 bg-slate-50 dark:bg-slate-800/60 rounded-2xl border border-slate-200 dark:border-slate-700 flex items-start gap-3">
+            <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+            <div className="text-xs text-slate-600 dark:text-slate-300 space-y-1">
+              <span className="font-bold text-slate-900 dark:text-white block">Zero-PHI Privacy Guarantee (HIPAA Compliant)</span>
+              <p>
+                Medrella notification channels transmit only operational scheduling tokens, doctor details, and payment receipts. Unencrypted messages never contain clinical diagnoses, symptoms, or prescription records.
+              </p>
+            </div>
+          </div>
+
+          {/* Preferences Card List */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Channel 1: Email */}
+            <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5 shadow-xs flex flex-col justify-between space-y-4">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-xl bg-emerald-100 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
+                      <Mail className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900 dark:text-white">Email Notifications</h3>
+                      <span className="text-[10px] text-slate-400 font-medium">To: {currentUser.email || "Registered Email"}</span>
+                    </div>
+                  </div>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                    preferences.emailEnabled ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-400" : "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-400"
+                  }`}>
+                    {preferences.emailEnabled ? "ENABLED" : "MUTED"}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  Receive HTML confirmation slips, doctor rescheduling/leave notices, and itemized billing receipts.
+                </p>
+              </div>
+
+              <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">Email Alerts</span>
+                <button
+                  onClick={() => handleTogglePreference('emailEnabled')}
+                  disabled={savingPrefs}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    preferences.emailEnabled ? 'bg-emerald-600' : 'bg-slate-300 dark:bg-slate-700'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                      preferences.emailEnabled ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+
+            {/* Channel 2: SMS Text */}
+            <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5 shadow-xs flex flex-col justify-between space-y-4">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-xl bg-sky-100 dark:bg-sky-950 text-sky-600 dark:text-sky-400 flex items-center justify-center">
+                      <MessageSquare className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900 dark:text-white">SMS Text Alerts</h3>
+                      <span className="text-[10px] text-slate-400 font-medium">To: Registered Mobile Phone</span>
+                    </div>
+                  </div>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                    preferences.smsEnabled ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-400" : "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-400"
+                  }`}>
+                    {preferences.smsEnabled ? "ENABLED" : "MUTED"}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  Instant text alerts for OPD token number assignment, emergency shift cancellations, and refund confirmations.
+                </p>
+              </div>
+
+              <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">SMS Alerts</span>
+                <button
+                  onClick={() => handleTogglePreference('smsEnabled')}
+                  disabled={savingPrefs}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    preferences.smsEnabled ? 'bg-emerald-600' : 'bg-slate-300 dark:bg-slate-700'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                      preferences.smsEnabled ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+
+            {/* Channel 3: Automated Reminders (24h & 1h) */}
+            <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5 shadow-xs flex flex-col justify-between space-y-4">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-xl bg-purple-100 dark:bg-purple-950 text-purple-600 dark:text-purple-400 flex items-center justify-center">
+                      <Clock className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900 dark:text-white">Upcoming Consultation Reminders</h3>
+                      <span className="text-[10px] text-slate-400 font-medium">Cadence: 24h & 1h Prior</span>
+                    </div>
+                  </div>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                    preferences.remindersEnabled ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-400" : "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-400"
+                  }`}>
+                    {preferences.remindersEnabled ? "ACTIVE" : "PAUSED"}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  Automated background reminder scheduler delivers notifications 24 hours prior and 1 hour before OPD check-in.
+                </p>
+              </div>
+
+              <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">Pre-Visit Reminders</span>
+                <button
+                  onClick={() => handleTogglePreference('remindersEnabled')}
+                  disabled={savingPrefs}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    preferences.remindersEnabled ? 'bg-emerald-600' : 'bg-slate-300 dark:bg-slate-700'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                      preferences.remindersEnabled ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+
+            {/* Channel 4: Optional Marketing & Wellness Updates */}
+            <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5 shadow-xs flex flex-col justify-between space-y-4">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-xl bg-amber-100 dark:bg-amber-950 text-amber-600 dark:text-amber-400 flex items-center justify-center">
+                      <Sparkles className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900 dark:text-white">Health & Wellness Advisories</h3>
+                      <span className="text-[10px] text-slate-400 font-medium">Optional Marketing</span>
+                    </div>
+                  </div>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                    preferences.marketingConsent ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-400" : "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-400"
+                  }`}>
+                    {preferences.marketingConsent ? "OPTED IN" : "OPTED OUT"}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  Seasonal vaccine reminders, clinical wellness workshops, and cardiology health tips. Opt-in is completely voluntary.
+                </p>
+              </div>
+
+              <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">Wellness Updates</span>
+                <button
+                  onClick={() => handleTogglePreference('marketingConsent')}
+                  disabled={savingPrefs}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    preferences.marketingConsent ? 'bg-emerald-600' : 'bg-slate-300 dark:bg-slate-700'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                      preferences.marketingConsent ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

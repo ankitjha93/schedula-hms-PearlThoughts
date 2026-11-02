@@ -12,7 +12,11 @@ export async function PATCH(
 
     // Handle appointment rescheduling
     if (action === 'RESCHEDULE') {
-      if (!newDate || !newTime) {
+      const targetDate = newDate || body.date;
+      const targetTime = newTime || body.time;
+      const targetReason = reason || body.rescheduleReason;
+
+      if (!targetDate || !targetTime) {
         return NextResponse.json(
           { success: false, error: 'newDate and newTime are required to reschedule' },
           { status: 400 }
@@ -20,7 +24,7 @@ export async function PATCH(
       }
 
       try {
-        const rescheduled = rescheduleAppointment(id, newDate, newTime, reason);
+        const rescheduled = rescheduleAppointment(id, targetDate, targetTime, targetReason);
         if (!rescheduled) {
           return NextResponse.json(
             { success: false, error: 'Appointment not found' },

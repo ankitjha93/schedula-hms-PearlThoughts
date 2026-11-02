@@ -20,6 +20,8 @@ import {
   SlotHold,
   AppointmentReminder,
   NotificationItem,
+  NotificationLog,
+  PatientNotificationPreferences,
   PaymentProvider,
   PaymentStatus,
   RefundStatus
@@ -38,6 +40,8 @@ import {
 } from './mockData';
 import { getPaymentGateway } from './payments/gateway';
 import { NotificationService } from './notifications/service';
+import { getEmailProvider } from './notifications/providers/email';
+import { getSmsProvider } from './notifications/providers/sms';
 
 const DATA_DIR = process.env.VERCEL ? '/tmp' : path.join(process.cwd(), '.data');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
@@ -55,6 +59,8 @@ interface DatabaseSchema {
   processedWebhooks: string[];
   reminders: AppointmentReminder[];
   notifications: NotificationItem[];
+  notificationLogs: NotificationLog[];
+  patientPreferences: Record<string, PatientNotificationPreferences>;
 }
 
 // In-memory fallback / cache
@@ -80,6 +86,8 @@ function loadDatabase(): DatabaseSchema {
         processedWebhooks: parsed.processedWebhooks || [],
         reminders: parsed.reminders || [...INITIAL_REMINDERS],
         notifications: parsed.notifications || [...INITIAL_NOTIFICATIONS],
+        notificationLogs: parsed.notificationLogs || [],
+        patientPreferences: parsed.patientPreferences || {},
       };
       return cachedDb!;
     }
@@ -101,6 +109,8 @@ function loadDatabase(): DatabaseSchema {
     processedWebhooks: [],
     reminders: [...INITIAL_REMINDERS],
     notifications: [...INITIAL_NOTIFICATIONS],
+    notificationLogs: [],
+    patientPreferences: {},
   };
 
   saveDatabase(cachedDb);
@@ -1563,5 +1573,190 @@ export function markWebhookProcessed(eventId: string): void {
     db.processedWebhooks.push(eventId);
     saveDatabase(db);
   }
+}
+
+// ============================================================================
+// --- NOTIFICATION DELIVERY LOGS & AUDIT ---
+// ============================================================================
+
+export function addNotificationLog(log: NotificationLog): NotificationLog {
+  const db = loadDatabase();
+  if (!db.notificationLogs) db.notificationLogs = [];
+  db.notificationLogs.unshift(log);
+  saveDatabase(db);
+  return log;
+}
+
+export function updateNotificationLog(updatedLog: NotificationLog): void {
+  const db = loadDatabase();
+  if (!db.notificationLogs) return;
+  const idx = db.notificationLogs.findIndex(l => l.id === updatedLog.id);
+  if (idx !== -1) {
+    db.notificationLogs[idx] = updatedLog;
+    saveDatabase(db);
+  }
+}
+
+export function getNotificationLogs(filter?: {
+  channel?: string;
+  status?: string;
+  patientId?: string;
+  appointmentId?: string;
+}): NotificationLog[] {
+  const db = loadDatabase();
+  let list = db.notificationLogs || [];
+
+  if (filter?.channel && filter.channel !== 'ALL') {
+    list = list.filter(l => l.channel === filter.channel);
+  }
+  if (filter?.status && filter.status !== 'ALL') {
+    list = list.filter(l => l.status === filter.status);
+  }
+  if (filter?.patientId) {
+    list = list.filter(l => l.patientId === filter.patientId);
+  }
+  if (filter?.appointmentId) {
+    list = list.filter(l => l.appointmentId === filter.appointmentId);
+  }
+
+  return list;
+}
+
+export function isNotificationDuplicate(idempotencyKey: string): boolean {
+  if (!idempotencyKey) return false;
+  const db = loadDatabase();
+  return (db.notificationLogs || []).some(
+    l => l.idempotencyKey === idempotencyKey && l.status === 'SENT'
+  );
+}
+
+// ============================================================================
+// --- PATIENT NOTIFICATION PREFERENCES ---
+// ============================================================================
+
+export function getPatientNotificationPreferences(patientId: string): PatientNotificationPreferences {
+  const db = loadDatabase();
+  const defaultPrefs: PatientNotificationPreferences = {
+    emailEnabled: true,
+    smsEnabled: true,
+    remindersEnabled: true,
+    marketingConsent: false,
+  };
+
+  if (!db.patientPreferences) db.patientPreferences = {};
+  return db.patientPreferences[patientId] || defaultPrefs;
+}
+
+export function updatePatientNotificationPreferences(
+  patientId: string,
+  prefs: Partial<PatientNotificationPreferences>
+): PatientNotificationPreferences {
+  const db = loadDatabase();
+  if (!db.patientPreferences) db.patientPreferences = {};
+
+  const current = getPatientNotificationPreferences(patientId);
+  const updated: PatientNotificationPreferences = {
+    ...current,
+    ...prefs,
+  };
+
+  db.patientPreferences[patientId] = updated;
+  saveDatabase(db);
+  return updated;
+}
+
+// ============================================================================
+// --- NOTIFICATION RETRY HANDLER ---
+// ============================================================================
+
+export async function retryNotificationDelivery(logId: string): Promise<{
+  success: boolean;
+  log?: NotificationLog;
+  error?: string;
+}> {
+  const db = loadDatabase();
+  if (!db.notificationLogs) return { success: false, error: 'No notification logs found' };
+
+  const index = db.notificationLogs.findIndex(l => l.id === logId);
+  if (index === -1) return { success: false, error: 'Notification log not found' };
+
+  const log = db.notificationLogs[index];
+  if (log.attempts >= log.maxAttempts) {
+    return { success: false, error: `Maximum retry attempts (${log.maxAttempts}) reached for this notification.` };
+  }
+
+  log.attempts += 1;
+  log.status = 'RETRYING';
+
+  try {
+    if (log.channel === 'EMAIL') {
+      const emailProvider = getEmailProvider();
+      const res = await emailProvider.send({
+        to: log.recipient,
+        subject: log.subject || 'Medrella HMS Notification',
+        html: log.content,
+        text: log.content.replace(/<[^>]*>?/gm, ''),
+      });
+      if (res.success) {
+        log.status = 'SENT';
+        log.providerMessageId = res.messageId;
+        log.sentAt = new Date().toISOString();
+        log.errorMessage = undefined;
+      } else {
+        log.status = 'FAILED';
+        log.errorMessage = res.error;
+      }
+    } else if (log.channel === 'SMS') {
+      const smsProvider = getSmsProvider();
+      const res = await smsProvider.send({
+        to: log.recipient,
+        message: log.content,
+      });
+      if (res.success) {
+        log.status = 'SENT';
+        log.providerMessageId = res.messageId;
+        log.sentAt = new Date().toISOString();
+        log.errorMessage = undefined;
+      } else {
+        log.status = 'FAILED';
+        log.errorMessage = res.error;
+      }
+    } else {
+      log.status = 'SENT';
+      log.sentAt = new Date().toISOString();
+    }
+  } catch (err: any) {
+    log.status = 'FAILED';
+    log.errorMessage = err.message || 'Retry failed';
+  }
+
+  db.notificationLogs[index] = log;
+  saveDatabase(db);
+  return { success: log.status === 'SENT', log, error: log.errorMessage };
+}
+
+// ============================================================================
+// --- DOCTOR LEAVE & SESSION CANCELLATION ---
+// ============================================================================
+
+export async function notifyDoctorLeave(
+  doctorId: string,
+  date: string,
+  reason: string
+): Promise<{ affectedCount: number; appointments: Appointment[] }> {
+  const db = loadDatabase();
+  const affected = db.appointments.filter(
+    a => a.doctorId === doctorId && a.date === date && a.status !== 'CANCELLED' && a.status !== 'COMPLETED'
+  );
+
+  // Dispatch doctor leave notifications to each patient
+  for (const appt of affected) {
+    appt.status = 'CANCELLED';
+    appt.symptoms = `${appt.symptoms} (Doctor Session Cancelled: ${reason})`;
+    await NotificationService.notifyDoctorLeave(appt, reason, addNotification);
+  }
+
+  saveDatabase(db);
+  return { affectedCount: affected.length, appointments: affected };
 }
 

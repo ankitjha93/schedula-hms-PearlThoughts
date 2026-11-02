@@ -26,6 +26,7 @@ export interface PatientProfile {
     relationship: string;
     phone: string;
   };
+  notificationPreferences?: PatientNotificationPreferences;
 }
 
 export interface Doctor {
@@ -274,6 +275,7 @@ export interface PaymentRecord {
   patientId: string;
   patientName: string;
   patientEmail: string;
+  patientPhone?: string;
   doctorId: string;
   doctorName: string;
   amount: number;
@@ -314,3 +316,47 @@ export interface AppointmentReminder {
   status: 'SCHEDULED' | 'SENT' | 'CANCELLED';
   sentAt?: string;
 }
+
+export type NotificationChannel = 'EMAIL' | 'SMS' | 'IN_APP';
+export type NotificationDeliveryStatus = 'SENT' | 'FAILED' | 'PENDING' | 'RETRYING';
+export type NotificationEventType =
+  | 'BOOKING_CONFIRMATION'
+  | 'RESCHEDULE'
+  | 'RESCHEDULE_CONFIRMATION'
+  | 'CANCELLATION'
+  | 'CANCELLATION_CONFIRMATION'
+  | 'REMINDER_24H'
+  | 'REMINDER_1H'
+  | 'UPCOMING_REMINDER'
+  | 'DOCTOR_LEAVE'
+  | 'PAYMENT_RECEIPT'
+  | 'REFUND_PROCESSED'
+  | 'REFUND_UPDATE';
+
+export interface NotificationLog {
+  id: string;
+  appointmentId?: string;
+  patientId?: string;
+  recipient: string; // email address or phone number
+  channel: NotificationChannel;
+  eventType: NotificationEventType;
+  subject?: string;
+  content: string;
+  status: NotificationDeliveryStatus;
+  attempts: number;
+  maxAttempts: number;
+  idempotencyKey: string;
+  provider: 'RESEND' | 'TWILIO' | 'SMTP' | 'SIMULATED';
+  providerMessageId?: string;
+  errorMessage?: string;
+  sentAt?: string;
+  createdAt: string;
+}
+
+export interface PatientNotificationPreferences {
+  emailEnabled: boolean;
+  smsEnabled: boolean;
+  remindersEnabled: boolean;
+  marketingConsent: boolean;
+}
+
