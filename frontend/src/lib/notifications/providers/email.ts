@@ -104,8 +104,9 @@ export class SimulatedEmailProvider implements EmailProvider {
  */
 export function getEmailProvider(): EmailProvider {
   const apiKey = process.env.RESEND_API_KEY;
+  const defaultFrom = process.env.RESEND_FROM || 'Medrella Health <onboarding@resend.dev>';
   if (apiKey && !apiKey.includes('placeholder') && !apiKey.includes('mock')) {
-    return new ResendEmailProvider(apiKey);
+    return new ResendEmailProvider(apiKey, defaultFrom);
   }
   return new SimulatedEmailProvider();
 }
