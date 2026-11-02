@@ -129,6 +129,8 @@ function saveDatabase(db: DatabaseSchema) {
   }
 }
 
+import { resolveDoctorCoordinates, calculateDistanceKm } from './geoUtils';
+
 function normalizeDoctor(d: Doctor): Doctor {
   return {
     ...d,
@@ -141,6 +143,7 @@ function normalizeDoctor(d: Doctor): Doctor {
     languages: d.languages || ['English'],
     acceptedInsurance: d.acceptedInsurance || ['Aetna', 'BlueCross BlueShield', 'Cigna', 'Medicare'],
     nextAvailableSlot: d.nextAvailableSlot || 'Today, 10:30 AM',
+    coordinates: d.coordinates || resolveDoctorCoordinates(d.hospital, d.location),
   };
 }
 
@@ -163,9 +166,18 @@ function normalizeAppointment(a: Appointment): Appointment {
 }
 
 // --- DOCTORS ---
-export function getDoctors(search?: string, specialty?: string): Doctor[] {
+export function getDoctors(
+  search?: string,
+  specialty?: string,
+  locationFilter?: {
+    lat?: number;
+    lng?: number;
+    radiusKm?: number;
+    city?: string;
+  }
+): Doctor[] {
   const db = loadDatabase();
-  let list = db.doctors;
+  let list = db.doctors.map(normalizeDoctor);
 
   if (search) {
     const q = search.toLowerCase();
@@ -174,6 +186,7 @@ export function getDoctors(search?: string, specialty?: string): Doctor[] {
       d.specialization.toLowerCase().includes(q) ||
       (d.specialty && d.specialty.toLowerCase().includes(q)) ||
       d.hospital.toLowerCase().includes(q) ||
+      (d.location && d.location.toLowerCase().includes(q)) ||
       (d.about && d.about.toLowerCase().includes(q)) ||
       (d.education && d.education.toLowerCase().includes(q)) ||
       (d.conditions && d.conditions.some(c => c.toLowerCase().includes(q)))
@@ -187,7 +200,34 @@ export function getDoctors(search?: string, specialty?: string): Doctor[] {
     );
   }
 
-  return list.map(normalizeDoctor);
+  if (locationFilter?.city && locationFilter.city !== 'ALL') {
+    const c = locationFilter.city.toLowerCase();
+    list = list.filter(d => 
+      (d.coordinates?.city && d.coordinates.city.toLowerCase().includes(c)) ||
+      d.hospital.toLowerCase().includes(c) ||
+      (d.location && d.location.toLowerCase().includes(c))
+    );
+  }
+
+  if (locationFilter?.lat !== undefined && locationFilter?.lng !== undefined) {
+    const pLat = locationFilter.lat;
+    const pLng = locationFilter.lng;
+    list = list.map(d => {
+      const dLat = d.coordinates?.lat ?? 40.7589;
+      const dLng = d.coordinates?.lng ?? -73.9851;
+      const dist = calculateDistanceKm(pLat, pLng, dLat, dLng);
+      return { ...d, distanceKm: dist };
+    });
+
+    if (locationFilter.radiusKm) {
+      const maxR = locationFilter.radiusKm;
+      list = list.filter(d => (d.distanceKm ?? 0) <= maxR);
+    }
+
+    list.sort((a, b) => (a.distanceKm ?? 9999) - (b.distanceKm ?? 9999));
+  }
+
+  return list;
 }
 
 export function getDoctorById(id: string): Doctor | undefined {

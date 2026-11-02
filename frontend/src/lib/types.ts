@@ -29,6 +29,15 @@ export interface PatientProfile {
   notificationPreferences?: PatientNotificationPreferences;
 }
 
+export interface DoctorCoordinates {
+  lat: number;
+  lng: number;
+  city: string;
+  state?: string;
+  postalCode?: string;
+  formattedAddress: string;
+}
+
 export interface Doctor {
   id: string;
   name: string;
@@ -49,6 +58,8 @@ export interface Doctor {
   hospital: string;
   departmentCode?: string;
   roomNumber?: string;
+  coordinates?: DoctorCoordinates;
+  distanceKm?: number;
   availableDays: string[]; // e.g. ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
   conditions?: string[];
   languages?: string[];

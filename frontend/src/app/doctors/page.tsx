@@ -34,7 +34,12 @@ import {
   Languages,
   Check,
   ExternalLink,
+  Navigation,
+  LocateFixed,
+  Map as MapIcon,
 } from "lucide-react";
+import { formatDistance, getDirectionsUrl, getCurrentPatientPosition, calculateDistanceKm, GeoPoint } from "@/lib/geoUtils";
+import DoctorLocationMap from "@/components/DoctorLocationMap";
 
 export default function DoctorsDirectoryPage() {
   const [doctors, setDoctors] = useState<Doctor[]>([]);
@@ -44,7 +49,12 @@ export default function DoctorsDirectoryPage() {
   const [feeFilter, setFeeFilter] = useState<string>("ALL");
   const [availabilityFilter, setAvailabilityFilter] = useState<"ALL" | "TODAY" | "TOP_RATED">("ALL");
   const [sortBy, setSortBy] = useState<string>("RATING");
-  const [viewMode, setViewMode] = useState<"GRID" | "LIST">("GRID");
+  const [viewMode, setViewMode] = useState<"GRID" | "LIST" | "MAP">("GRID");
+  const [patientLocation, setPatientLocation] = useState<GeoPoint | null>(null);
+  const [locating, setLocating] = useState<boolean>(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
+  const [campusFilter, setCampusFilter] = useState<string>("ALL");
+  const [radiusFilter, setRadiusFilter] = useState<string>("ALL");
 
   // Modals state
   const [selectedDoctor, setSelectedDoctor] = useState<Doctor | null>(null);
@@ -66,6 +76,26 @@ export default function DoctorsDirectoryPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleGetLocation = async () => {
+    setLocating(true);
+    setLocationError(null);
+    try {
+      const pos = await getCurrentPatientPosition();
+      setPatientLocation(pos);
+      setSortBy("DISTANCE");
+    } catch (err: any) {
+      setLocationError(err.message || "Failed to detect location");
+    } finally {
+      setLocating(false);
+    }
+  };
+
+  const handleClearLocation = () => {
+    setPatientLocation(null);
+    setLocationError(null);
+    if (sortBy === "DISTANCE") setSortBy("RATING");
   };
 
   // Dynamic specialties map with counts
@@ -109,17 +139,31 @@ export default function DoctorsDirectoryPage() {
   };
 
   const filteredDoctors = doctors
+    .map((doc) => {
+      if (patientLocation && doc.coordinates) {
+        const dist = calculateDistanceKm(
+          patientLocation.lat,
+          patientLocation.lng,
+          doc.coordinates.lat,
+          doc.coordinates.lng
+        );
+        return { ...doc, distanceKm: dist };
+      }
+      return doc;
+    })
     .filter((doc) => {
       const spec = doc.specialty || doc.specialization;
       const fee = doc.fee !== undefined ? doc.fee : doc.consultationFee;
       const q = searchQuery.trim().toLowerCase();
 
-      // Search matches name, specialty, hospital, bio, education, conditions
+      // Search matches name, specialty, hospital, location, city, bio, education, conditions
       const matchesSearch =
         !q ||
         doc.name.toLowerCase().includes(q) ||
         spec.toLowerCase().includes(q) ||
         doc.hospital.toLowerCase().includes(q) ||
+        (doc.location && doc.location.toLowerCase().includes(q)) ||
+        (doc.coordinates?.city && doc.coordinates.city.toLowerCase().includes(q)) ||
         (doc.education && doc.education.toLowerCase().includes(q)) ||
         (doc.bio && doc.bio.toLowerCase().includes(q)) ||
         (doc.about && doc.about.toLowerCase().includes(q)) ||
@@ -140,9 +184,28 @@ export default function DoctorsDirectoryPage() {
         matchesAvail = doc.rating >= 4.88;
       }
 
-      return matchesSearch && matchesSpecialty && matchesFee && matchesAvail;
+      // Campus / City filter
+      let matchesCampus = true;
+      if (campusFilter !== "ALL") {
+        const c = campusFilter.toLowerCase();
+        matchesCampus =
+          doc.hospital.toLowerCase().includes(c) ||
+          Boolean(doc.coordinates?.city && doc.coordinates.city.toLowerCase().includes(c)) ||
+          Boolean(doc.location && doc.location.toLowerCase().includes(c));
+      }
+
+      // Radius filter (when patientLocation active)
+      let matchesRadius = true;
+      if (radiusFilter !== "ALL" && doc.distanceKm !== undefined) {
+        matchesRadius = doc.distanceKm <= Number(radiusFilter);
+      }
+
+      return matchesSearch && matchesSpecialty && matchesFee && matchesAvail && matchesCampus && matchesRadius;
     })
     .sort((a, b) => {
+      if (sortBy === "DISTANCE") {
+        return (a.distanceKm ?? 9999) - (b.distanceKm ?? 9999);
+      }
       const feeA = a.fee !== undefined ? a.fee : a.consultationFee;
       const feeB = b.fee !== undefined ? b.fee : b.consultationFee;
       if (sortBy === "FEE_ASC") return feeA - feeB;
@@ -158,6 +221,10 @@ export default function DoctorsDirectoryPage() {
     setSpecialtyFilter("ALL");
     setFeeFilter("ALL");
     setAvailabilityFilter("ALL");
+    setCampusFilter("ALL");
+    setRadiusFilter("ALL");
+    setPatientLocation(null);
+    setLocationError(null);
     setSortBy("RATING");
   };
 
@@ -165,7 +232,10 @@ export default function DoctorsDirectoryPage() {
     searchQuery.trim() !== "" ||
     specialtyFilter !== "ALL" ||
     feeFilter !== "ALL" ||
-    availabilityFilter !== "ALL";
+    availabilityFilter !== "ALL" ||
+    campusFilter !== "ALL" ||
+    radiusFilter !== "ALL" ||
+    patientLocation !== null;
 
   const handleBook = (doctor: Doctor) => {
     setSelectedDoctor(doctor);
@@ -241,7 +311,7 @@ export default function DoctorsDirectoryPage() {
       <div className="bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-5">
         <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
           {/* Smart Search Bar */}
-          <div className="relative md:col-span-5">
+          <div className="relative md:col-span-4">
             <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
             <input
               type="text"
@@ -268,7 +338,7 @@ export default function DoctorsDirectoryPage() {
               onChange={(e) => setSpecialtyFilter(e.target.value)}
               className="w-full pl-10 pr-8 py-2.5 border border-slate-200 dark:border-slate-700 rounded-xl text-xs bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-medium focus:ring-2 focus:ring-emerald-500 appearance-none cursor-pointer outline-hidden"
             >
-              <option value="ALL">All Clinical Specialties ({doctors.length})</option>
+              <option value="ALL">All Specialties ({doctors.length})</option>
               {Object.keys(specialtyCounts)
                 .sort()
                 .map((spec) => (
@@ -279,18 +349,23 @@ export default function DoctorsDirectoryPage() {
             </select>
           </div>
 
-          {/* Fee Filter */}
-          <div className="relative md:col-span-2">
-            <DollarSign className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
+          {/* Hospital Campus / City Location Filter */}
+          <div className="relative md:col-span-3">
+            <MapPin className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
             <select
-              value={feeFilter}
-              onChange={(e) => setFeeFilter(e.target.value)}
+              value={campusFilter}
+              onChange={(e) => setCampusFilter(e.target.value)}
               className="w-full pl-10 pr-8 py-2.5 border border-slate-200 dark:border-slate-700 rounded-xl text-xs bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-medium focus:ring-2 focus:ring-emerald-500 appearance-none cursor-pointer outline-hidden"
             >
-              <option value="ALL">All Fees (USD / INR)</option>
-              <option value="UNDER_65">&lt; $65 / ₹65</option>
-              <option value="65_TO_80">$65 - $80 / ₹65 - ₹80</option>
-              <option value="OVER_80">&gt; $80 / ₹80</option>
+              <option value="ALL">All Hospital Campuses</option>
+              <option value="Manhattan">Manhattan Health District</option>
+              <option value="Midtown">Midtown Pavilion</option>
+              <option value="Upper East Side">Upper East Side</option>
+              <option value="Lower Manhattan">Lower Manhattan / Downtown</option>
+              <option value="City General Hospital">City General Hospital</option>
+              <option value="St. Jude Specialty Hospital">St. Jude Specialty Hospital</option>
+              <option value="Childrens Wellness Hospital">Children&apos;s Wellness Pavilion</option>
+              <option value="Medrella Neuroscience Pavilion">Neuroscience Pavilion</option>
             </select>
           </div>
 
@@ -302,6 +377,7 @@ export default function DoctorsDirectoryPage() {
               onChange={(e) => setSortBy(e.target.value)}
               className="w-full pl-10 pr-8 py-2.5 border border-slate-200 dark:border-slate-700 rounded-xl text-xs bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-medium focus:ring-2 focus:ring-emerald-500 appearance-none cursor-pointer outline-hidden"
             >
+              {patientLocation && <option value="DISTANCE">Nearest to You 📍</option>}
               <option value="RATING">Highest Rated ⭐</option>
               <option value="EXPERIENCE">Most Experienced</option>
               <option value="REVIEWS">Most Reviewed</option>
@@ -311,11 +387,53 @@ export default function DoctorsDirectoryPage() {
           </div>
         </div>
 
+        {/* Location Alerts / Error Banner */}
+        {locationError && (
+          <div className="p-3 bg-amber-50 dark:bg-amber-950/40 rounded-xl border border-amber-200 dark:border-amber-800 flex items-center justify-between text-xs text-amber-800 dark:text-amber-200">
+            <div className="flex items-center gap-2">
+              <MapPin className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>{locationError}. You can still browse by hospital campus or manual city filter.</span>
+            </div>
+            <button onClick={() => setLocationError(null)} className="p-1 hover:opacity-70">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
         {/* Availability Toggle + View Mode Row */}
         <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-100 dark:border-slate-800">
-          {/* Quick Availability Filters */}
+          {/* Quick Filters + Near Me */}
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mr-1">Availability:</span>
+            {/* Geolocation Button */}
+            <button
+              onClick={patientLocation ? handleClearLocation : handleGetLocation}
+              disabled={locating}
+              className={`text-xs px-3 py-1.5 rounded-xl font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                patientLocation
+                  ? "bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300 border border-sky-300 dark:border-sky-800"
+                  : "bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200"
+              }`}
+              title={patientLocation ? "Click to reset your device location" : "Find specialists nearest to your device"}
+            >
+              <LocateFixed className={`w-3.5 h-3.5 ${locating ? "animate-spin text-sky-500" : patientLocation ? "text-sky-500" : "text-slate-400"}`} />
+              <span>{locating ? "Detecting GPS..." : patientLocation ? "Near Me (Active) ✕" : "Find Near Me"}</span>
+            </button>
+
+            {/* Radius Selector (when location is active) */}
+            {patientLocation && (
+              <select
+                value={radiusFilter}
+                onChange={(e) => setRadiusFilter(e.target.value)}
+                className="text-xs px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-semibold cursor-pointer outline-hidden"
+              >
+                <option value="ALL">All Distances</option>
+                <option value="5">&lt; 5 km</option>
+                <option value="15">&lt; 15 km</option>
+                <option value="30">&lt; 30 km</option>
+              </select>
+            )}
+
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 ml-1 mr-1">Availability:</span>
             <button
               onClick={() => setAvailabilityFilter("ALL")}
               className={`text-xs px-3 py-1 rounded-xl font-semibold transition cursor-pointer ${
@@ -324,7 +442,7 @@ export default function DoctorsDirectoryPage() {
                   : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200"
               }`}
             >
-              All Availability
+              All
             </button>
             <button
               onClick={() => setAvailabilityFilter("TODAY")}
@@ -335,7 +453,7 @@ export default function DoctorsDirectoryPage() {
               }`}
             >
               <Zap className="w-3 h-3 text-amber-400" />
-              <span>Available Today</span>
+              <span>Today</span>
             </button>
             <button
               onClick={() => setAvailabilityFilter("TOP_RATED")}
@@ -353,7 +471,7 @@ export default function DoctorsDirectoryPage() {
           {/* View mode toggle & counter */}
           <div className="flex items-center space-x-3">
             <div className="text-xs font-semibold text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700">
-              Showing <span className="font-bold text-emerald-600 dark:text-emerald-400">{filteredDoctors.length}</span> of {doctors.length} specialists
+              Showing <span className="font-bold text-emerald-600 dark:text-emerald-400">{filteredDoctors.length}</span> of {doctors.length}
             </div>
 
             <div className="flex items-center p-1 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
@@ -378,6 +496,18 @@ export default function DoctorsDirectoryPage() {
                 title="List View"
               >
                 <List className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setViewMode("MAP")}
+                className={`p-1.5 rounded-lg transition cursor-pointer flex items-center gap-1 text-xs font-bold ${
+                  viewMode === "MAP"
+                    ? "bg-white dark:bg-slate-900 text-emerald-600 dark:text-emerald-400 shadow-xs"
+                    : "text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                }`}
+                title="Interactive Map View"
+              >
+                <MapIcon className="w-4 h-4" />
+                <span className="hidden sm:inline">Map</span>
               </button>
             </div>
           </div>
@@ -494,6 +624,26 @@ export default function DoctorsDirectoryPage() {
             Clear All Filters
           </button>
         </div>
+      ) : viewMode === "MAP" ? (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between px-1">
+            <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
+              Showing {filteredDoctors.length} {filteredDoctors.length === 1 ? "specialist" : "specialists"} across Medrella network
+            </span>
+            {patientLocation && (
+              <span className="text-xs text-emerald-600 dark:text-emerald-400 font-medium flex items-center space-x-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                <span>Distances calculated from your live GPS location</span>
+              </span>
+            )}
+          </div>
+          <DoctorLocationMap
+            doctors={filteredDoctors}
+            patientLocation={patientLocation}
+            onBookDoctor={handleBook}
+            onSelectDoctor={setProfileDoctor}
+          />
+        </div>
       ) : viewMode === "GRID" ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {filteredDoctors.map((doc) => {
@@ -590,10 +740,24 @@ export default function DoctorsDirectoryPage() {
 
                   {/* Hospital & Credentials Details */}
                   <div className="space-y-1 text-xs text-slate-500 dark:text-slate-400 pt-2 border-t border-slate-100 dark:border-slate-800">
-                    <div className="flex items-center space-x-2">
-                      <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                      <span className="truncate font-medium">{doc.hospital}</span>
+                    <div className="flex items-center justify-between gap-1">
+                      <div className="flex items-center space-x-2 truncate">
+                        <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                        <span className="truncate font-medium">{doc.hospital}</span>
+                      </div>
+                      {doc.distanceKm !== undefined && (
+                        <span className="shrink-0 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 flex items-center space-x-1">
+                          <MapPin className="w-2.5 h-2.5" />
+                          <span>{formatDistance(doc.distanceKm)}</span>
+                        </span>
+                      )}
                     </div>
+                    {doc.coordinates?.formattedAddress && (
+                      <div className="flex items-center space-x-2 text-[11px] text-slate-400 truncate">
+                        <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                        <span className="truncate">{doc.coordinates.formattedAddress}</span>
+                      </div>
+                    )}
                     <div className="flex items-center space-x-2">
                       <GraduationCap className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                       <span className="truncate">{doc.education}</span>
@@ -607,6 +771,17 @@ export default function DoctorsDirectoryPage() {
 
                 {/* Card Action CTAs */}
                 <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2">
+                  {doc.coordinates && (
+                    <a
+                      href={getDirectionsUrl(doc.coordinates, doc.name)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="Get Directions in Google Maps"
+                      className="p-2 text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-emerald-50 hover:text-emerald-600 dark:hover:bg-emerald-950/40 dark:hover:text-emerald-400 rounded-xl transition cursor-pointer flex items-center justify-center shrink-0 border border-slate-200/60 dark:border-slate-700/60"
+                    >
+                      <Navigation className="w-4 h-4" />
+                    </a>
+                  )}
                   <button
                     onClick={() => setProfileDoctor(doc)}
                     className="flex-1 py-2 text-center text-xs font-bold text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-xl transition cursor-pointer"
@@ -671,6 +846,15 @@ export default function DoctorsDirectoryPage() {
                       </span>
                       <span>•</span>
                       <span className="font-medium text-slate-700 dark:text-slate-300">{doc.hospital}</span>
+                      {doc.distanceKm !== undefined && (
+                        <>
+                          <span>•</span>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 flex items-center space-x-1">
+                            <MapPin className="w-2.5 h-2.5" />
+                            <span>{formatDistance(doc.distanceKm)}</span>
+                          </span>
+                        </>
+                      )}
                       <span>•</span>
                       <span>{doc.experience || `${doc.experienceYears} yrs`} experience</span>
                       <span>•</span>
@@ -699,6 +883,17 @@ export default function DoctorsDirectoryPage() {
                       ₹{fee} / ${fee}
                     </div>
                   </div>
+                  {doc.coordinates && (
+                    <a
+                      href={getDirectionsUrl(doc.coordinates, doc.name)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="Get Directions in Google Maps"
+                      className="p-2 text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-emerald-50 hover:text-emerald-600 dark:hover:bg-emerald-950/40 dark:hover:text-emerald-400 rounded-xl transition cursor-pointer flex items-center justify-center shrink-0 border border-slate-200/60 dark:border-slate-700/60"
+                    >
+                      <Navigation className="w-4 h-4" />
+                    </a>
+                  )}
                   <button
                     onClick={() => setProfileDoctor(doc)}
                     className="px-3.5 py-2 text-xs font-bold text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-xl transition cursor-pointer"
@@ -810,14 +1005,32 @@ export default function DoctorsDirectoryPage() {
                 </div>
 
                 <div className="p-3.5 bg-slate-50 dark:bg-slate-800/50 rounded-2xl border border-slate-100 dark:border-slate-800 space-y-1">
-                  <span className="font-bold text-slate-500 uppercase text-[10px] flex items-center space-x-1">
-                    <Building2 className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Hospital Station &amp; Room</span>
-                  </span>
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-500 uppercase text-[10px] flex items-center space-x-1">
+                      <Building2 className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>Hospital Station &amp; Room</span>
+                    </span>
+                    {profileDoctor.coordinates && (
+                      <a
+                        href={getDirectionsUrl(profileDoctor.coordinates, profileDoctor.name)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 hover:underline flex items-center space-x-1"
+                      >
+                        <Navigation className="w-3 h-3" />
+                        <span>Directions</span>
+                      </a>
+                    )}
+                  </div>
                   <div className="font-semibold text-slate-800 dark:text-slate-200 leading-snug">
                     {profileDoctor.location || profileDoctor.hospital}
                     {profileDoctor.roomNumber && ` • ${profileDoctor.roomNumber}`}
                   </div>
+                  {profileDoctor.coordinates?.formattedAddress && (
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                      {profileDoctor.coordinates.formattedAddress}
+                    </div>
+                  )}
                 </div>
               </div>
 

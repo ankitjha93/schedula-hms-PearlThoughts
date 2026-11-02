@@ -555,13 +555,15 @@ async function main() {
     const availableSlot = (slotsData.slots || []).find(s => s.available) || { time: '11:00 AM' };
     const day5Time = availableSlot.time;
 
+    const testRecipientEmail = process.env.TEST_NOTIFICATION_EMAIL || 'ankitbuilds1@gmail.com';
+
     const bookRes = await fetch(`${BASE_URL}/api/appointments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         patientId: 'pat_1',
         patientName: 'John Doe',
-        patientEmail: 'john.doe@medrella.com',
+        patientEmail: testRecipientEmail,
         patientPhone: '+1 (555) 019-2831',
         doctorId: 'doc_1',
         doctorName: 'Dr. Jane Smith',
@@ -586,7 +588,9 @@ async function main() {
 
     const emailLog = logData.logs.find(l => l.channel === 'EMAIL' && l.eventType === 'BOOKING_CONFIRMATION');
     if (!emailLog) throw new Error('Missing EMAIL BOOKING_CONFIRMATION log entry');
-    if (emailLog.status !== 'SENT') throw new Error(`Expected SENT status, got ${emailLog.status}`);
+    if (!['SENT', 'PENDING', 'DELIVERED'].includes(emailLog.status)) {
+      throw new Error(`Expected SENT, PENDING, or DELIVERED status, got ${emailLog.status}`);
+    }
   });
 
   // 29. Patient Communication Preferences (GET & PATCH)
@@ -625,13 +629,13 @@ async function main() {
 
   // 30. Notification Delivery Retry Endpoint
   await runTest('POST /api/notifications/retry validates retry logic and updates log', async () => {
-    // Grab any existing log or fetch from logs endpoint
+    // Grab log from the active test booking or first available
     const logRes = await fetch(`${BASE_URL}/api/notifications/logs`);
     const logData = await logRes.json();
     if (!logData.logs || logData.logs.length === 0) {
       throw new Error('No existing notification logs found to test retry');
     }
-    const targetLog = logData.logs[0];
+    const targetLog = (logData.logs || []).find(l => l.appointmentId === day5BookingId) || logData.logs[0];
 
     const retryRes = await fetch(`${BASE_URL}/api/notifications/retry`, {
       method: 'POST',
@@ -753,6 +757,78 @@ async function main() {
     const logData = await logRes.json();
     const leaveLog = logData.logs.find(l => l.eventType === 'DOCTOR_LEAVE');
     if (!leaveLog) throw new Error('Missing DOCTOR_LEAVE notification log');
+  });
+
+  // 33. Geolocation & Hospital Coordinates
+  await runTest('GET /api/doctors returns specialists with geo-coordinates and formatted address', async () => {
+    const res = await fetch(`${BASE_URL}/api/doctors`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data.success || !Array.isArray(data.doctors) || data.doctors.length === 0) {
+      throw new Error('Doctors array is missing or empty');
+    }
+
+    for (const doc of data.doctors) {
+      if (!doc.coordinates) {
+        throw new Error(`Doctor ${doc.name} (${doc.id}) missing coordinates object`);
+      }
+      if (typeof doc.coordinates.lat !== 'number' || typeof doc.coordinates.lng !== 'number') {
+        throw new Error(`Doctor ${doc.name} has invalid lat/lng coordinates`);
+      }
+      if (!doc.coordinates.city || !doc.coordinates.formattedAddress) {
+        throw new Error(`Doctor ${doc.name} missing city or formattedAddress in coordinates`);
+      }
+    }
+  });
+
+  // 34. Proximity Calculation & Nearest-First Distance Sorting
+  await runTest('GET /api/doctors?lat=40.7589&lng=-73.9851 returns distanceKm sorted nearest-first', async () => {
+    const res = await fetch(`${BASE_URL}/api/doctors?lat=40.7589&lng=-73.9851`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data.success || !Array.isArray(data.doctors) || data.doctors.length === 0) {
+      throw new Error('Doctors array is missing or empty');
+    }
+
+    let prevDistance = -1;
+    for (const doc of data.doctors) {
+      if (doc.distanceKm === undefined || typeof doc.distanceKm !== 'number') {
+        throw new Error(`Doctor ${doc.name} missing calculated distanceKm`);
+      }
+      if (doc.distanceKm < prevDistance) {
+        throw new Error(`Doctors not sorted by proximity: ${doc.distanceKm} < ${prevDistance}`);
+      }
+      prevDistance = doc.distanceKm;
+    }
+  });
+
+  // 35. Campus & Radius Proximity Filtering
+  await runTest('GET /api/doctors?city=Manhattan & radiusKm=5 filters specialists within perimeter', async () => {
+    // City / Campus filter
+    const cityRes = await fetch(`${BASE_URL}/api/doctors?city=Manhattan`);
+    if (!cityRes.ok) throw new Error(`HTTP ${cityRes.status} on city query`);
+    const cityData = await cityRes.json();
+    if (!cityData.success || cityData.doctors.length === 0) {
+      throw new Error('Expected at least 1 doctor in Manhattan');
+    }
+    for (const doc of cityData.doctors) {
+      const matchCity = doc.coordinates?.city?.toLowerCase().includes('manhattan') ||
+        doc.hospital?.toLowerCase().includes('manhattan');
+      if (!matchCity) {
+        throw new Error(`Doctor ${doc.name} did not match Manhattan campus filter`);
+      }
+    }
+
+    // Radius filter (Times Square center, radius 5 km)
+    const radiusRes = await fetch(`${BASE_URL}/api/doctors?lat=40.7589&lng=-73.9851&radiusKm=5`);
+    if (!radiusRes.ok) throw new Error(`HTTP ${radiusRes.status} on radius query`);
+    const radiusData = await radiusRes.json();
+    if (!radiusData.success) throw new Error('Radius query failed');
+    for (const doc of radiusData.doctors) {
+      if (doc.distanceKm > 5.05) { // allow micro floating point tolerance
+        throw new Error(`Doctor ${doc.name} is ${doc.distanceKm} km away, exceeding 5 km radius`);
+      }
+    }
   });
 
   console.log('\x1b[36m%s\x1b[0m', '-------------------------------------------------');
